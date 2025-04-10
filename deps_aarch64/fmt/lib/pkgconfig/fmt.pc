@@ -1,0 +1,11 @@
+prefix=/home/HOBOT/jia.e/3rdparty/fmt-9.0.0_gcc.9.3.0/out
+exec_prefix=/home/HOBOT/jia.e/3rdparty/fmt-9.0.0_gcc.9.3.0/out
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: fmt
+Description: A modern formatting library
+Version: 9.0.0
+Libs: -L${libdir} -lfmt
+Cflags: -I${includedir}
+

@@ -38,12 +38,18 @@ static int prepare_tensor(hbDNNTensor *input_tensor, hbDNNTensor *output_tensor,
       }
     }
 
-    int input_memSize = input[i].properties.stride[0] *
-                        input[i].properties.validShape.dimensionSize[0];
+    int input_memSize = input[i].properties.alignedByteSize;
+    // std::cout<<"input_memSize: "<<input_memSize<<std::endl;
     // std::cout<<input[i].properties.validShape.dimensionSize[0]<<std::endl;
     // std::cout<<input[i].properties.validShape.dimensionSize[1]<<std::endl;
-    HB_CHECK_SUCCESS(hbSysAllocCachedMem(&input[i].sysMem[0], input_memSize),
-                     "hbSysAllocCachedMem failed");
+    HB_CHECK_SUCCESS(hbUCPMallocCached(&input[i].sysMem, input_memSize, 0),
+                     "hbUCPMallocCached failed");
+
+    // Show how to get input name
+    const char *input_name;
+    HB_CHECK_SUCCESS(hbDNNGetInputName(&input_name, dnn_handle, i),
+                     "hbDNNGetInputName failed");
+    LOGI("input[{}] name is {}", i, input_name);
   }
 
   hbDNNTensor *output = output_tensor;
@@ -52,10 +58,18 @@ static int prepare_tensor(hbDNNTensor *input_tensor, hbDNNTensor *output_tensor,
         hbDNNGetOutputTensorProperties(&output[i].properties, dnn_handle, i),
         "hbDNNGetOutputTensorProperties failed");
     int output_memSize = output[i].properties.alignedByteSize;
+    if (output_memSize == 48) output_memSize=64;
+    // std::cout<<"output_memSize: "<<output_memSize<<std::endl;
     // std::cout<<output[i].properties.validShape.dimensionSize[0]<<std::endl;
     // std::cout<<output[i].properties.validShape.dimensionSize[1]<<std::endl;
-    HB_CHECK_SUCCESS(hbSysAllocCachedMem(&output[i].sysMem[0], output_memSize),
+    HB_CHECK_SUCCESS(hbUCPMallocCached(&output[i].sysMem, output_memSize, 0),
                      "hbUCPMallocCached failed");
+    
+    // Show how to get output name
+    const char *output_name;
+    HB_CHECK_SUCCESS(hbDNNGetOutputName(&output_name, dnn_handle, i),
+                     "hbDNNGetOutputName failed");
+    LOGI("output[{}] name is {}", i, output_name);
   }
   return 0;
 }
@@ -97,7 +111,7 @@ bool ModelTask::ModelInit(std::string &model_path){
 }
 
 
-std::vector<float> ModelTask::ModelInfer(std::vector<float> &input){
+std::vector<std::vector<float>> ModelTask::ModelInfer(std::vector<std::vector<float>> &input){
   std::vector<hbDNNTensor> input_tensors_;
   std::vector<hbDNNTensor> output_tensors_;
   input_tensors_.resize(input_count_);
@@ -106,49 +120,56 @@ std::vector<float> ModelTask::ModelInfer(std::vector<float> &input){
 
 
   //load input
-  float *data_dst = reinterpret_cast<float *>(input_tensors_[0].sysMem[0].virAddr);
-  float a = 0;
-  for(int i = 0; i < input.size(); i++){
-    *data_dst = input[i];
-    data_dst++;
+  for(int i = 0; i < input_count_; i++){
+    float32_t *data_dst = reinterpret_cast<float32_t *>(input_tensors_[i].sysMem.virAddr);
+    for(int j = 0; j < input[i].size(); j++){
+      *data_dst = input[i][j];
+      data_dst++;
+    }
+    hbUCPMemFlush(&input_tensors_[i].sysMem, HB_SYS_MEM_CACHE_CLEAN);
   }
-  data_dst = reinterpret_cast<float *>(input_tensors_[0].sysMem[0].virAddr);
-  for(int i = 0; i < input.size(); i++){
-    a = a + *data_dst;
-    data_dst++;
-  }
-  // std::cout<<"sum:"<<a<<std::endl;
-  hbSysFlushMem(&input_tensors_[0].sysMem[0], HB_SYS_MEM_CACHE_CLEAN);
-  hbDNNTaskHandle_t task_handle{nullptr};
-  hbDNNTensor *output = &(output_tensors_[0]);
+
+  hbUCPTaskHandle_t task_handle{nullptr};
+  hbDNNTensor *output = output_tensors_.data();
+  std::vector<std::vector<float>> results;
   std::vector<float> result;
   {
     // generate task handle
-    hbDNNInferCtrlParam infer_ctrl_param;
-    HB_DNN_INITIALIZE_INFER_CTRL_PARAM(&infer_ctrl_param);
-    hbDNNInfer(&task_handle, &output, input_tensors_.data(), dnn_handle_, &infer_ctrl_param);
+    hbDNNInferV2(&task_handle, output, input_tensors_.data(), dnn_handle_);
 
-    hbDNNWaitTaskDone(task_handle, 0);
+    // submit task
+    hbUCPSchedParam ctrl_param;
+    HB_UCP_INITIALIZE_SCHED_PARAM(&ctrl_param);
+    ctrl_param.backend = HB_UCP_BPU_CORE_ANY;
+    hbUCPSubmitTask(task_handle, &ctrl_param);
 
-    hbSysFlushMem(&output_tensors_[0].sysMem[0], HB_SYS_MEM_CACHE_INVALIDATE);
-    float* data = reinterpret_cast<float *>(output->sysMem[0].virAddr);
-    for (auto i = 0; i < output[0].properties.validShape.dimensionSize[1]; i++) {
-      float score = data[i];
-      result.push_back(score);
+    // wait task done
+    hbUCPWaitTaskDone(task_handle, 0);
+    for(int i = 0; i < output_count_; i++){
+      hbUCPMemFlush(&output_tensors_[i].sysMem, HB_SYS_MEM_CACHE_INVALIDATE);
+      float* data = reinterpret_cast<float *>(output[i].sysMem.virAddr);
+      
+      int index = 1;
+      if(output[i].properties.validShape.dimensionSize[index] == 1) index = 2;
+      for (auto j = 0; j < output[i].properties.validShape.dimensionSize[index]; j++) {
+        float score = data[j];
+        result.push_back(score);
+      }
+      results.push_back(result);
     }
-
-    hbDNNReleaseTask(task_handle);
+    
+    hbUCPReleaseTask(task_handle);
   }
 
   for (int i = 0; i < input_count_; i++) {
-    hbSysFreeMem(&(input_tensors_[i].sysMem[0]));
+    hbUCPFree(&(input_tensors_[i].sysMem));
   }
   // free output mem
   for (int i = 0; i < output_count_; i++) {
-    hbSysFreeMem(&(output_tensors_[i].sysMem[0]));
+    hbUCPFree(&(output_tensors_[i].sysMem));
   }
   
-  return result;
+  return results;
 
 }
 
@@ -179,7 +200,7 @@ std::vector<float> ModelTask::ModelInfer(std::vector<float> &input){
 //   // }
 
 //   file.close();
-//   float *data_dst = reinterpret_cast<float *>(input_tensors_[0].sysMem.virAddr);
+//   float32_t *data_dst = reinterpret_cast<float32_t *>(input_tensors_[0].sysMem.virAddr);
 //   for(int i = 0; i < numbers.size(); i++){
 //     *data_dst++ = numbers[i];
 //     std::cout<<numbers[i]<<" ";
@@ -190,7 +211,7 @@ std::vector<float> ModelTask::ModelInfer(std::vector<float> &input){
 // }
 
 // bool ModelTask::LoadInput(std::vector<float> &input){
-//   float *data_dst = reinterpret_cast<float *>(input_tensors_[0].sysMem.virAddr);
+//   float32_t *data_dst = reinterpret_cast<float32_t *>(input_tensors_[0].sysMem.virAddr);
 //   float a = 0;
 //   for(int i = 0; i < input.size(); i++){
 //     *data_dst++ = input[i];
