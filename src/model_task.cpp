@@ -58,10 +58,9 @@ static int prepare_tensor(hbDNNTensor *input_tensor, hbDNNTensor *output_tensor,
         hbDNNGetOutputTensorProperties(&output[i].properties, dnn_handle, i),
         "hbDNNGetOutputTensorProperties failed");
     int output_memSize = output[i].properties.alignedByteSize;
-    if (output_memSize == 48) output_memSize=64;
-    // std::cout<<"output_memSize: "<<output_memSize<<std::endl;
-    // std::cout<<output[i].properties.validShape.dimensionSize[0]<<std::endl;
-    // std::cout<<output[i].properties.validShape.dimensionSize[1]<<std::endl;
+    
+    output_memSize = (output_memSize + 31) & ~31;
+
     HB_CHECK_SUCCESS(hbUCPMallocCached(&output[i].sysMem, output_memSize, 0),
                      "hbUCPMallocCached failed");
     
@@ -149,9 +148,14 @@ std::vector<std::vector<float>> ModelTask::ModelInfer(std::vector<std::vector<fl
       hbUCPMemFlush(&output_tensors_[i].sysMem, HB_SYS_MEM_CACHE_INVALIDATE);
       float* data = reinterpret_cast<float *>(output[i].sysMem.virAddr);
       
-      int index = 1;
-      if(output[i].properties.validShape.dimensionSize[index] == 1) index = 2;
-      for (auto j = 0; j < output[i].properties.validShape.dimensionSize[index]; j++) {
+      int dimensionSize = 1;
+      int d_index = 0;
+      while(output[i].properties.validShape.dimensionSize[d_index] != 0){
+        dimensionSize *= output[i].properties.validShape.dimensionSize[d_index];
+        d_index++;
+      }
+
+      for (auto j = 0; j < dimensionSize; j++) {
         float score = data[j];
         result.push_back(score);
       }
