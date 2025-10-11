@@ -47,7 +47,7 @@ public:
     ModelTask();
     ~ModelTask();
     bool ModelInit(std::string &model_path);
-    std::vector<float> ModelInfer(std::vector<float> &input);
+    std::vector<std::vector<float>> ModelInfer(std::vector<std::vector<float>> &input);
     // bool LoadFile(std::string &file_path);
     // bool LoadInput(std::vector<float> &input);
 private:
@@ -57,6 +57,7 @@ private:
   int model_count_ = 0;
   int input_count_ = 0;
   int output_count_ = 0;
+
 };
 
 #endif //MODEL_TASK_H_
